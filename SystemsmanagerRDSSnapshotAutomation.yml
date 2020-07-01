@@ -1,0 +1,51 @@
+description: '# SQL Server RDS Snapshot Copy and Restore'
+schemaVersion: '0.3'
+assumeRole: 'arn:aws:iam::393318631168:role/AWSSSMfullRole'
+parameters:
+  databaseInstance:
+    type: String
+    default: database-1
+mainSteps:
+  - name: Snapshot_DBInstance
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: PowerShell Core 6.0
+      Script: "Write-Host 'Starting Snapshot';\r\nInstall-Module AWS.Tools.RDS -Force\r\n#Import-Module -Name 'AWSPowershell';\r\n#Install-Module -Name AWSPowershell.NetCore -Force;\r\nImport-Module -Name 'AWS.Tools.RDS';\r\n#Import-Module -Name 'AWSPowershell.NetCore';\r\n$inputPayload = $env:InputPayload | ConvertFrom-Json; \r\n$time_now = Get-Date -format \"HHmmss\"\r\n$dbinstanceidentifier = $inputPayload.databaseInstance;\r\n$snapname = \"$dbinstanceidentifier-$time_now\";\r\n$dbins = Get-RDSDBInstance -DBInstanceIdentifier $dbinstanceidentifier -Region ap-south-1;\r\n$dbinsIdentifier = $dbins.DBInstanceIdentifier;\r\nif($dbins.DBInstanceStatus -eq \"available\"){\r\n  New-RDSDBSnapshot -DBInstanceIdentifier $dbinsIdentifier -DBSnapshotIdentifier $snapname;\r\n  $snapshotstatus = Get-RDSDBSnapshot -DBSnapshotIdentifier $snapname | select Status;\r\n} else {\r\n  Write-Host \"DBInstance not available for Snapshot\"\r\n}\r\nwhile($snapshotstatus.Status -eq \"creating\"){\r\n  $snapshotstatus = Get-RDSDBSnapshot -DBSnapshotIdentifier $snapname | select Status;\r\n  if($snapshotstatus.Status -eq \"available\"){\r\n    break;\r\n  }\r\n}\r\n\r\n<#$returnObject = New-Object -TypeName psobject;\r\n$returnObject | Add-Member -MemberType NoteProperty -Name Message -Value 'success';\r\n$returnObject | Add-Member -MemberType NoteProperty -Name Snapshot -Value $snapname;#>\r\nreturn @{message='success'\r\n        snapshotname=$snapname\r\n        };"
+      InputPayload:
+        databaseInstance: '{{databaseInstance}}'
+    outputs:
+      - Name: message
+        Selector: $.Payload.message
+        Type: String
+      - Name: snapshotname
+        Selector: $.Payload.DBSnapshotIdentifier
+  - name: CopySnapshot
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: PowerShell Core 6.0
+      Script: "Write-Host 'Starting Snapshot'; \r\nInstall-Module AWS.Tools.RDS -Force;\r\n#Install-Module -Name AWSPowershell.NetCore -Force;\r\nImport-Module -Name AWS.Tools.RDS;\r\n#$snapname = \"Snapshot1\";\r\n$inputPayload = $env:InputPayload | ConvertFrom-Json; \r\n$snapname = $inputPayload.snapshotname;\r\n$targetregion = \"us-east-1\";\r\n$targetsnapshot = $snapname;\r\n$snapshotarn = Get-RDSDBSnapshot -DBSnapshotIdentifier $snapname\r\n$snapshotarn = $snapshotarn.DBSnapshotArn\r\n\r\n$copyret = Copy-RDSDBSnapshot -SourceDBSnapshotIdentifier $snapshotarn -TargetDBSnapshotIdentifier $targetsnapshot -Region $targetregion;\r\n\r\nwhile($copyret.Status -eq \"pending\"){\r\n  $copystatus = Get-RDSDBSnapshot -Region $targetregion -DBSnapshotIdentifier $copyret.DBSnapshotIdentifier;\r\n  $copystatus = $copystatus.Status;\r\n  if($copystatus -eq \"available\"){\r\n    break;\r\n  }\r\n}\r\n$targetsnapshotid = $copyret.DBSnapshotIdentifier;\r\nreturn @{message='success'\r\n        snapshot = $targetsnapshotid\r\n        }"
+      InputPayload:
+        snapshotname: '{{Snapshot_DBInstance.snapshotname}}'
+    outputs:
+      - Name: snapshotname
+        Selector: $.Payload.snapshot
+    isEnd: true
+  - name: RestoreSnapshot
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: PowerShell Core 6.0
+      Script: |-
+        Write-Host 'Restoring'; 
+        Install-Module AWS.Tools.RDS -Force;
+        Import-Module -Name AWS.Tools.RDS;
+        $inputPayload = $env:InputPayload | ConvertFrom-Json; 
+        $snapname = $inputPayload.snapshotname;
+
+        $DBInstanceIdentifier = "restore-database-1"
+        #$snapname = "Snapshot1";
+        $targetregion = "us-east-1";
+        $targetsnapshot = $snapname;
+        Restore-RDSDBInstanceFromDBSnapshot -DBInstanceIdentifier $DBInstanceIdentifier -DBSnapshotIdentifier $targetsnapshot -Region $targetregion
+        return @{message='success'}
+      InputPayload:
+        snapshotname: '{{CopySnapshot.snapshotname}}'
